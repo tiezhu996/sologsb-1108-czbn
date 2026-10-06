@@ -4,6 +4,8 @@ import { ElMessage } from 'element-plus'
 import DilutionInput from '../components/common/DilutionInput.vue'
 import StatBadge from '../components/common/StatBadge.vue'
 import { useDeveloperStore } from '../stores/developerStore'
+import { useRecipeStore } from '../stores/recipeStore'
+import { resolveRunDeveloperId, useRunStore } from '../stores/runStore'
 import type { Developer, DeveloperCategory, DeveloperState, Dilution } from '../types/developer'
 import { calculateStockVolume, remainingRolls } from '../utils/ratio'
 
@@ -19,6 +21,8 @@ interface DeveloperForm {
 }
 
 const developerStore = useDeveloperStore()
+const recipeStore = useRecipeStore()
+const runStore = useRunStore()
 const showForm = ref(false)
 const saving = ref(false)
 const form = reactive<DeveloperForm>({
@@ -36,6 +40,15 @@ function stateTone(developer: Developer): 'cyan' | 'amber' | 'rose' {
   if (developer.state === '报废') return 'rose'
   if (developer.state === '新配') return 'cyan'
   return 'amber'
+}
+
+function lastRunLabel(developer: Developer): string {
+  const matched = runStore.runs.filter(
+    (run) => resolveRunDeveloperId(run, recipeStore.recipes) === developer.id
+  )
+  if (matched.length === 0) return '尚未用于实冲'
+  const latest = [...matched].sort((a, b) => b.runDate.localeCompare(a.runDate))[0]
+  return `${latest.batchNo}（${latest.runDate}）`
 }
 
 async function submitDeveloper(): Promise<void> {
@@ -71,7 +84,7 @@ async function scrapDeveloper(id?: number): Promise<void> {
 }
 
 onMounted(() => {
-  void developerStore.load()
+  void Promise.all([developerStore.load(), recipeStore.load(), runStore.load()])
 })
 </script>
 
@@ -184,6 +197,7 @@ onMounted(() => {
             <div><dt>工作液容量</dt><dd>{{ developer.volumeMl }} mL</dd></div>
             <div><dt>配制日期</dt><dd>{{ developer.mixedAt }}</dd></div>
             <div><dt>所需浓缩液</dt><dd>{{ calculateStockVolume(developer.volumeMl, developer.dilution) }} mL</dd></div>
+            <div><dt>最近实冲</dt><dd>{{ lastRunLabel(developer) }}</dd></div>
           </dl>
           <div class="life-meter">
             <div class="life-meter__head">

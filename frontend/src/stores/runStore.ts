@@ -1,8 +1,15 @@
 import { defineStore } from 'pinia'
 import { db, plain } from '../utils/db'
+import type { DeveloperState } from '../types/developer'
+import type { DevRecipe } from '../types/dev-recipe'
 import type { DevRun } from '../types/dev-run'
 
 type NewRun = Omit<DevRun, 'id' | 'schemaRev'>
+
+export function resolveRunDeveloperId(run: DevRun, recipes: DevRecipe[]): number | undefined {
+  if (run.developerId !== undefined) return run.developerId
+  return recipes.find((recipe) => recipe.id === run.recipeId)?.developerId
+}
 
 export const useRunStore = defineStore('run', {
   state: () => ({
@@ -26,11 +33,12 @@ export const useRunStore = defineStore('run', {
     async addRun(payload: NewRun): Promise<number> {
       const next = { ...payload, schemaRev: 2 }
       const id = await db.runs.add(plain(next))
-      const recipe = await db.recipes.get(payload.recipeId)
-      if (recipe) {
-        const developer = await db.developers.get(recipe.developerId)
+      if (payload.developerId !== undefined) {
+        const developer = await db.developers.get(payload.developerId)
         if (developer && developer.id !== undefined && developer.state !== '报废') {
-          await db.developers.update(developer.id, plain({ usedRolls: developer.usedRolls + 1 }))
+          const usedRolls = developer.usedRolls + 1
+          const state: DeveloperState = usedRolls >= developer.maxRolls ? '报废' : developer.state
+          await db.developers.update(developer.id, plain({ usedRolls, state }))
         }
       }
       await this.load()
