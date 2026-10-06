@@ -24,13 +24,15 @@ export const useRunStore = defineStore('run', {
       }
     },
     async addRun(payload: NewRun): Promise<number> {
-      const next = { ...payload, schemaRev: 2 }
+      const next = { ...payload, schemaRev: 3 }
       const id = await db.runs.add(plain(next))
-      const recipe = await db.recipes.get(payload.recipeId)
-      if (recipe) {
-        const developer = await db.developers.get(recipe.developerId)
+      // 只扣本次实际选用的那瓶工作液；配方关联的旧瓶不再被动消耗。
+      if (payload.developerId !== undefined) {
+        const developer = await db.developers.get(payload.developerId)
         if (developer && developer.id !== undefined && developer.state !== '报废') {
-          await db.developers.update(developer.id, plain({ usedRolls: developer.usedRolls + 1 }))
+          const usedRolls = developer.usedRolls + 1
+          const state = usedRolls >= developer.maxRolls ? '报废' : '在用'
+          await db.developers.update(developer.id, plain({ usedRolls, state }))
         }
       }
       await this.load()

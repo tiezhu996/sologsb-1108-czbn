@@ -4,7 +4,10 @@ import { ElMessage } from 'element-plus'
 import DilutionInput from '../components/common/DilutionInput.vue'
 import StatBadge from '../components/common/StatBadge.vue'
 import { useDeveloperStore } from '../stores/developerStore'
+import { useRecipeStore } from '../stores/recipeStore'
+import { useRunStore } from '../stores/runStore'
 import type { Developer, DeveloperCategory, DeveloperState, Dilution } from '../types/developer'
+import type { DevRun } from '../types/dev-run'
 import { calculateStockVolume, remainingRolls } from '../utils/ratio'
 
 interface DeveloperForm {
@@ -19,6 +22,8 @@ interface DeveloperForm {
 }
 
 const developerStore = useDeveloperStore()
+const recipeStore = useRecipeStore()
+const runStore = useRunStore()
 const showForm = ref(false)
 const saving = ref(false)
 const form = reactive<DeveloperForm>({
@@ -36,6 +41,20 @@ function stateTone(developer: Developer): 'cyan' | 'amber' | 'rose' {
   if (developer.state === '报废') return 'rose'
   if (developer.state === '新配') return 'cyan'
   return 'amber'
+}
+
+// 实冲记录优先按记录上的工作液编号归属；旧记录没有编号时回退到配方关联的工作液
+function runBelongsTo(run: DevRun, developerId: number): boolean {
+  const recipe = recipeStore.recipes.find((item) => item.id === run.recipeId)
+  return (run.developerId ?? recipe?.developerId) === developerId
+}
+
+function lastRunLabel(developerId?: number): string {
+  if (developerId === undefined) return '暂无实冲记录'
+  const latest = runStore.runs
+    .filter((run) => runBelongsTo(run, developerId))
+    .sort((a, b) => b.runDate.localeCompare(a.runDate) || (b.id ?? 0) - (a.id ?? 0))[0]
+  return latest ? `${latest.batchNo} · ${latest.runDate}` : '暂无实冲记录'
 }
 
 async function submitDeveloper(): Promise<void> {
@@ -71,7 +90,7 @@ async function scrapDeveloper(id?: number): Promise<void> {
 }
 
 onMounted(() => {
-  void developerStore.load()
+  void Promise.all([developerStore.load(), recipeStore.load(), runStore.load()])
 })
 </script>
 
@@ -184,6 +203,7 @@ onMounted(() => {
             <div><dt>工作液容量</dt><dd>{{ developer.volumeMl }} mL</dd></div>
             <div><dt>配制日期</dt><dd>{{ developer.mixedAt }}</dd></div>
             <div><dt>所需浓缩液</dt><dd>{{ calculateStockVolume(developer.volumeMl, developer.dilution) }} mL</dd></div>
+            <div><dt>最近实冲</dt><dd>{{ lastRunLabel(developer.id) }}</dd></div>
           </dl>
           <div class="life-meter">
             <div class="life-meter__head">

@@ -78,6 +78,14 @@ export class FilmDevDatabase extends Dexie {
         run.schemaRev = 2
       })
     })
+    // version(3) 仅为 runs 增加 developerId 索引，不回填历史记录：
+    // 旧实冲没有工作液编号，展示时仍按配方关联的工作液呈现，也不补扣寿命。
+    this.version(3).stores({
+      films: '++id, model, format, expireDate, rollsLeft',
+      developers: '++id, category, state, mixedAt',
+      recipes: '++id, filmId, developerId, dilution, pushPull, tempC',
+      runs: '++id, recipeId, developerId, runDate, tankType'
+    })
   }
 }
 

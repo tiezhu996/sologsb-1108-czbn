@@ -10,7 +10,10 @@ import { useDeveloperStore } from '../stores/developerStore'
 import { useFilmStore } from '../stores/filmStore'
 import { useRecipeStore } from '../stores/recipeStore'
 import { useRunStore } from '../stores/runStore'
-import type { TankType } from '../types/dev-run'
+import type { DevRecipe } from '../types/dev-recipe'
+import type { DevRun, TankType } from '../types/dev-run'
+import type { Developer } from '../types/developer'
+import { remainingRolls } from '../utils/ratio'
 
 interface FilterValue {
   keyword: string
@@ -20,6 +23,7 @@ interface FilterValue {
 interface RunForm {
   batchNo: string
   recipeId: number
+  developerId: number
   actualTempC: number
   actualMinutes: number
   tankType: TankType
@@ -52,6 +56,7 @@ const filterValue = ref<FilterValue>({
 const form = reactive<RunForm>({
   batchNo: `R-${today.replace(/-/g, '')}-01`,
   recipeId: 1,
+  developerId: 0,
   actualTempC: 20,
   actualMinutes: 8,
   tankType: '双联罐',
@@ -60,6 +65,13 @@ const form = reactive<RunForm>({
 })
 
 const selectedRecipe = computed(() => recipeStore.recipes.find((recipe) => recipe.id === form.recipeId))
+const recipeDeveloper = computed(() =>
+  developerStore.developers.find((item) => item.id === selectedRecipe.value?.developerId)
+)
+// 报废或余量用完的工作液不可选用
+const usableDevelopers = computed(() => developerStore.developers.filter((developer) =>
+  developer.state !== '报废' && remainingRolls(developer.maxRolls, developer.usedRolls) > 0
+))
 const referenceTemp = computed(() => selectedRecipe.value?.tempC ?? 20)
 const { suggest } = useTempCompensate(referenceTemp)
 const suggestion = computed(() => {
@@ -68,10 +80,23 @@ const suggestion = computed(() => {
   return suggest(recipe.devMinutes, form.actualTempC)
 })
 
+function defaultDeveloperId(recipe: DevRecipe | undefined): number {
+  if (!recipe) return 0
+  const usable = usableDevelopers.value
+  const own = usable.find((item) => item.id === recipe.developerId)
+  if (own?.id !== undefined) return own.id
+  const expected = developerStore.developers.find((item) => item.id === recipe.developerId)
+  const matching = usable.find((item) =>
+    item.category === expected?.category && item.dilution === recipe.dilution
+  )
+  return matching?.id ?? 0
+}
+
 watch(selectedRecipe, (recipe) => {
   if (!recipe) return
   form.actualTempC = recipe.tempC
   form.actualMinutes = recipe.devMinutes
+  form.developerId = defaultDeveloperId(recipe)
 }, { immediate: true })
 
 const filteredRuns = computed(() => {
@@ -101,6 +126,26 @@ function recipeForRun(id: number) {
   return recipeStore.recipes.find((item) => item.id === id)
 }
 
+// 新记录按实冲所选工作液展示；旧记录没有工作液编号时回退到配方关联的工作液
+function developerForRun(run: DevRun): Developer | undefined {
+  const developerId = run.developerId ?? recipeForRun(run.recipeId)?.developerId
+  return developerStore.developers.find((item) => item.id === developerId)
+}
+
+function validateDeveloper(recipe: DevRecipe, developer: Developer): string | null {
+  if (developer.state === '报废') return `「${developer.name}」已报废，不能用于实冲`
+  if (remainingRolls(developer.maxRolls, developer.usedRolls) === 0) {
+    return `「${developer.name}」余量已用完，不能用于实冲`
+  }
+  if (recipeDeveloper.value && developer.category !== recipeDeveloper.value.category) {
+    return `工作液类别与配方不一致：配方要求 ${recipeDeveloper.value.category}，所选为 ${developer.category}`
+  }
+  if (developer.dilution !== recipe.dilution) {
+    return `工作液稀释比与配方不一致：配方要求 ${recipe.dilution}，所选为 ${developer.dilution}`
+  }
+  return null
+}
+
 function applySuggestion(): void {
   if (!suggestion.value) return
   form.actualMinutes = suggestion.value.minutes
@@ -111,15 +156,28 @@ async function submitRun(): Promise<void> {
     ElMessage.warning('请填写批次号、配方与结果评价')
     return
   }
+  const recipe = selectedRecipe.value
+  if (!recipe) {
+    ElMessage.warning('请选择冲洗配方')
+    return
+  }
+  const developer = developerStore.developers.find((item) => item.id === form.developerId)
+  if (!developer) {
+    ElMessage.warning('请选择本次实际使用的工作液')
+    return
+  }
+  const mismatch = validateDeveloper(recipe, developer)
+  if (mismatch) {
+    ElMessage.error(mismatch)
+    return
+  }
   saving.value = true
-  const selectedDeveloper = developerStore.developers.find((item) => item.id === selectedRecipe.value?.developerId)
-  const willExceedLimit = selectedDeveloper !== undefined
-    && selectedDeveloper.state !== '报废'
-    && selectedDeveloper.usedRolls + 1 > selectedDeveloper.maxRolls
+  const willAutoScrap = developer.usedRolls + 1 >= developer.maxRolls
   try {
     await runStore.addRun({
       batchNo: form.batchNo.trim(),
       recipeId: Number(form.recipeId),
+      developerId: Number(form.developerId),
       actualTempC: Number(form.actualTempC),
       actualMinutes: Number(form.actualMinutes),
       tankType: form.tankType,
@@ -127,13 +185,14 @@ async function submitRun(): Promise<void> {
       result: form.result.trim()
     })
     await Promise.all([developerStore.load(), recipeStore.load()])
-    if (willExceedLimit) {
-      ElMessage.warning('冲洗记录已保存，本次已超过显影液标称可冲上限，请评估后标记报废')
+    if (willAutoScrap) {
+      ElMessage.warning(`冲洗记录已保存，「${developer.name}」已达可冲上限并自动报废`)
     } else {
-      ElMessage.success('冲洗记录已保存，显影液用量同步更新')
+      ElMessage.success('冲洗记录已保存，所选工作液用量已加一卷')
     }
     form.batchNo = `R-${today.replace(/-/g, '')}-${String(runStore.runs.length + 1).padStart(2, '0')}`
     form.result = ''
+    form.developerId = defaultDeveloperId(recipe)
     showForm.value = false
   } finally {
     saving.value = false
@@ -172,7 +231,7 @@ onMounted(async () => {
       <div class="inline-form__head">
         <div>
           <h2>录入本次实冲</h2>
-          <p>选择配方后会自动带入基准条件，可依据实测温度一键采用修正时间。</p>
+          <p>选择配方后自动带入基准条件，请再指定本次实际使用的工作液，保存时只扣该瓶寿命。</p>
         </div>
         <PushPullTag v-if="selectedRecipe" :value="selectedRecipe.pushPull" show-hint />
       </div>
@@ -188,6 +247,19 @@ onMounted(async () => {
               {{ recipeLabel(recipe.id ?? 0) }}
             </option>
           </select>
+        </label>
+        <label class="span-2">
+          <span>实际使用工作液</span>
+          <select v-model.number="form.developerId" data-testid="field-developerId">
+            <option :value="0" disabled>请选择工作液</option>
+            <option v-for="developer in usableDevelopers" :key="developer.id" :value="developer.id">
+              {{ developer.name }} · {{ developer.category }} {{ developer.dilution }} · 余 {{ remainingRolls(developer.maxRolls, developer.usedRolls) }} 卷
+            </option>
+          </select>
+          <small v-if="selectedRecipe">
+            配方要求 {{ recipeDeveloper?.category ?? '未知类别' }} · {{ selectedRecipe.dilution }}，报废或已用完的工作液不可选
+          </small>
+          <small v-if="usableDevelopers.length === 0">当前没有可用的工作液，请先在「显影液配制与余量」中登记。</small>
         </label>
         <label>
           <span>实测温度</span>
@@ -215,7 +287,7 @@ onMounted(async () => {
         <div class="span-3 compensation-callout">
           <div>
             <strong>温度补偿建议</strong>
-            <p v-if="suggestion">{{ suggestion.advice }}；显影液用量会在保存后加一卷。</p>
+            <p v-if="suggestion">{{ suggestion.advice }}；保存后给所选工作液加一卷，到达上限自动报废。</p>
             <p v-else>请选择一条配方后查看修正建议。</p>
           </div>
           <button type="button" class="ghost-button" :disabled="!suggestion" @click="applySuggestion">采用修正时间</button>
@@ -261,6 +333,7 @@ onMounted(async () => {
             <span><small>实测温度</small><strong>{{ run.actualTempC }}°C</strong></span>
             <span><small>实际时间</small><strong>{{ run.actualMinutes }} 分钟</strong></span>
             <span><small>罐型</small><strong>{{ run.tankType }}</strong></span>
+            <span><small>工作液</small><strong>{{ developerForRun(run)?.name ?? '未知显影液' }}</strong></span>
           </div>
           <blockquote>{{ run.result }}</blockquote>
           <div class="run-card__foot">
